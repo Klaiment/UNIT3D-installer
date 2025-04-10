@@ -292,3 +292,4 @@ EOF
     # Résumé de l'installation
     DB_ROOT_PASS=$DB_PASS
     INSTALL_TYPE="Installation native"
+fi
