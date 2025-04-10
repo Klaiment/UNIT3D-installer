@@ -2,12 +2,12 @@
 
 # ========================================================
 # Script d'installation automatique pour UNIT3D sur Ubuntu 24.04
-# Version: 2.0 - Avec support Docker
+# Version: 2.1 - Corrigé pour PHP 8.4
 # ========================================================
 
 # Vérification des privilèges root
 if [[ $EUID -ne 0 ]]; then
-   echo "Ce script doit être exécuté en tant que root" 
+   echo "Ce script doit être exécuté en tant que root"
    exit 1
 fi
 
@@ -93,24 +93,17 @@ apt install -y software-properties-common curl git unzip
 # Installation native
 if [[ "$install_method" == "1" ]]; then
     print_section "INSTALLATION NATIVE"
-    
+
     # Ajout du PPA pour PHP 8.4
     print_info "Ajout du dépôt PHP pour obtenir PHP 8.4..."
     add-apt-repository ppa:ondrej/php -y
     apt update
 
-    # Vérification de la disponibilité de PHP 8.4
-    if ! apt-cache show php8.4 &> /dev/null; then
-        print_error "PHP 8.4 n'est pas disponible dans les dépôts. Veuillez vérifier le PPA ou utiliser l'installation Docker."
-        exit 1
-    fi
-
     # Installation de PHP 8.4 et toutes les extensions requises
     print_info "Installation de PHP 8.4 et extensions requises..."
-    apt install -y php8.4 php8.4-cli php8.4-common php8.4-fpm php8.4-mysql \
+    apt install -y php8.4 php8.4-fpm php8.4-cli php8.4-common php8.4-mysql \
         php8.4-zip php8.4-gd php8.4-mbstring php8.4-curl php8.4-xml php8.4-bcmath \
-        php8.4-intl php8.4-readline php8.4-tokenizer php8.4-fileinfo php8.4-opcache \
-        php8.4-dom php8.4-json php8.4-libxml php8.4-redis
+        php8.4-intl php8.4-readline php8.4-opcache
 
     # Installation de Nginx
     print_info "Installation de Nginx..."
@@ -126,11 +119,11 @@ if [[ "$install_method" == "1" ]]; then
 
     # Sécurisation de MariaDB
     print_info "Configuration de MariaDB..."
-    mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password"
-    mysql -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('$DB_PASS')"
-    mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1')"
+    mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$DB_PASS'"
     mysql -e "DELETE FROM mysql.user WHERE User=''"
-    mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\_%'"
+    mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1')"
+    mysql -e "DROP DATABASE IF EXISTS test"
+    mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%'"
     mysql -e "FLUSH PRIVILEGES"
 
     # Création de la base de données et de l'utilisateur
@@ -150,7 +143,7 @@ if [[ "$install_method" == "1" ]]; then
     print_info "Installation de MeiliSearch..."
     curl -L https://install.meilisearch.com | sh
     mv ./meilisearch /usr/bin/
-    
+
     # Créer un service systemd pour MeiliSearch
     cat > /etc/systemd/system/meilisearch.service << EOF
 [Unit]
@@ -174,13 +167,13 @@ EOF
     print_info "Installation de Node.js et npm..."
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
     apt install -y nodejs
-    
+
     # Vérification des versions
     print_info "Versions installées:"
     php --version
     node --version
     npm --version
-    
+
     # Installation de Composer
     print_info "Installation de Composer..."
     curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
@@ -195,18 +188,6 @@ EOF
     # Installation des dépendances avec Composer
     print_info "Installation des dépendances PHP..."
     sudo -u www-data composer install --no-dev --optimize-autoloader
-
-    # En cas d'échec, proposer d'ignorer les exigences de plateforme
-    if [ $? -ne 0 ]; then
-        print_warning "L'installation standard des dépendances a échoué."
-        read -p "Voulez-vous essayer avec --ignore-platform-req=php? (o/n): " ignore_platform
-        if [[ "$ignore_platform" == "o" || "$ignore_platform" == "O" ]]; then
-            sudo -u www-data composer install --no-dev --optimize-autoloader --ignore-platform-req=php
-        else
-            print_error "Installation des dépendances échouée. Veuillez vérifier les exigences de PHP."
-            exit 1
-        fi
-    fi
 
     # Installation des dépendances Node.js
     print_info "Installation des dépendances Node.js..."
@@ -311,134 +292,3 @@ EOF
     # Résumé de l'installation
     DB_ROOT_PASS=$DB_PASS
     INSTALL_TYPE="Installation native"
-
-# Installation Docker
-else
-    print_section "INSTALLATION DOCKER"
-    
-    # Vérification de Docker
-    if ! check_command docker; then
-        print_info "Installation de Docker..."
-        curl -fsSL https://get.docker.com -o get-docker.sh
-        sh get-docker.sh
-        usermod -aG docker $USER
-    fi
-
-    # Vérification de Docker Compose
-    if ! check_command docker-compose; then
-        print_info "Installation de Docker Compose..."
-        apt install -y docker-compose-plugin
-    fi
-
-    # Clonage du dépôt UNIT3D
-    print_info "Téléchargement de UNIT3D..."
-    mkdir -p /var/www
-    cd /var/www
-    git clone https://github.com/HDInnovations/UNIT3D.git
-    cd UNIT3D
-
-    # Configuration du fichier .env
-    print_info "Configuration de l'environnement..."
-    cp .env.example .env
-
-    # Génération d'un ID utilisateur et groupe pour Sail
-    WWWUSER=$(id -u)
-    WWWGROUP=$(id -g)
-
-    # Mise à jour du fichier .env
-    sed -i "s|APP_URL=.*|APP_URL=$APP_URL|g" .env
-    sed -i "s|DB_DATABASE=.*|DB_DATABASE=$DB_NAME|g" .env
-    sed -i "s|DB_USERNAME=.*|DB_USERNAME=$DB_USER|g" .env
-    sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=$DB_PASS|g" .env
-    sed -i "s|MAIL_FROM_ADDRESS=.*|MAIL_FROM_ADDRESS=$admin_email|g" .env
-    
-    # Ajout des variables d'environnement pour Docker
-    echo "WWWUSER=$WWWUSER" >> .env
-    echo "WWWGROUP=$WWWGROUP" >> .env
-    echo "SERVER_NAME=$domain_name" >> .env
-    echo "SSL_DOMAIN=$domain_name" >> .env
-    
-    # Installation de Composer localement
-    print_info "Installation de Composer..."
-    curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-    
-    # Installation des dépendances avec Composer
-    print_info "Installation des dépendances PHP..."
-    composer install
-    
-    # Démarrage des conteneurs Docker
-    print_info "Démarrage des conteneurs Docker..."
-    docker-compose up -d
-    
-    # Attendre que les conteneurs soient prêts
-    print_info "Attente du démarrage des conteneurs..."
-    sleep 10
-    
-    # Exécution des migrations et seeders
-    print_info "Finalisation de l'installation..."
-    docker-compose exec laravel.test php artisan key:generate
-    docker-compose exec laravel.test php artisan migrate --seed
-    docker-compose exec laravel.test php artisan storage:link
-    
-    # Installation des dépendances Node.js et compilation des assets
-    print_info "Compilation des assets frontend..."
-    docker-compose exec laravel.test npm install
-    docker-compose exec laravel.test npm run build
-    
-    # Création d'un script de mise à jour
-    print_info "Création d'un script de mise à jour..."
-    cat > /usr/local/bin/update-unit3d-docker << EOF
-#!/bin/bash
-cd /var/www/UNIT3D
-git pull
-docker-compose exec laravel.test composer install --no-dev --optimize-autoloader
-docker-compose exec laravel.test npm install
-docker-compose exec laravel.test npm run build
-docker-compose exec laravel.test php artisan migrate
-docker-compose exec laravel.test php artisan cache:clear
-docker-compose exec laravel.test php artisan view:clear
-docker-compose exec laravel.test php artisan config:clear
-echo "UNIT3D a été mis à jour avec succès!"
-EOF
-    chmod +x /usr/local/bin/update-unit3d-docker
-    
-    # Résumé de l'installation
-    DB_ROOT_PASS=$DB_PASS
-    INSTALL_TYPE="Installation Docker"
-fi
-
-# Installation terminée
-print_info "Installation terminée avec succès!"
-echo ""
-echo "==================================================="
-echo "      RÉSUMÉ DE L'INSTALLATION"
-echo "==================================================="
-echo "Type d'installation: $INSTALL_TYPE"
-echo "URL du site: $APP_URL"
-echo "Base de données: $DB_NAME"
-echo "Utilisateur DB: $DB_USER"
-echo "Mot de passe DB: $DB_PASS"
-if [[ "$install_method" == "1" ]]; then
-    echo "Mot de passe root DB: $DB_ROOT_PASS"
-fi
-echo ""
-echo "Email admin: $admin_email"
-echo ""
-echo "Chemin d'installation: /var/www/UNIT3D"
-echo "==================================================="
-echo ""
-
-if [[ "$install_method" == "1" ]]; then
-    print_warning "N'oubliez pas de configurer HTTPS pour votre site!"
-    print_warning "Vous pouvez utiliser Certbot pour obtenir un certificat SSL gratuit:"
-    echo "sudo apt install -y certbot python3-certbot-nginx"
-    echo "sudo certbot --nginx -d $domain_name"
-    echo ""
-    print_info "Pour mettre à jour UNIT3D à l'avenir, utilisez la commande:"
-    echo "sudo update-unit3d"
-else
-    print_info "Pour mettre à jour UNIT3D à l'avenir, utilisez la commande:"
-    echo "sudo update-unit3d-docker"
-fi
-
-print_info "Pour accéder à votre site, visitez: $APP_URL"
