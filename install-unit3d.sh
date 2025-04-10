@@ -2,7 +2,8 @@
 
 # ========================================================
 # Script d'installation automatique pour UNIT3D sur Ubuntu 24.04
-# Version: 2.1 - Corrigé pour PHP 8.4
+# Version: 3.0 - Avec nettoyage complet et gestion des erreurs
+# Date: 11 avril 2025
 # ========================================================
 
 # Vérification des privilèges root
@@ -42,30 +43,58 @@ print_section() {
     echo "=================================================="
 }
 
-check_command() {
-    if ! command -v $1 &> /dev/null; then
-        print_error "La commande $1 n'est pas disponible."
-        return 1
-    fi
-    return 0
-}
-
 # Début de l'installation
 clear
 echo "=================================================="
 echo "     Installation automatique de UNIT3D"
 echo "=================================================="
 echo ""
-echo "Ce script propose deux méthodes d'installation :"
-echo "1) Installation native sur Ubuntu 24.04"
-echo "2) Installation via Docker (recommandé)"
+echo "Ce script va installer UNIT3D sur votre serveur Ubuntu 24.04"
+echo "ATTENTION: Une phase de nettoyage va supprimer toutes les installations existantes"
 echo ""
-read -p "Choisissez la méthode d'installation (1/2): " install_method
-
-if [[ "$install_method" != "1" && "$install_method" != "2" ]]; then
-    print_error "Choix invalide. Installation annulée."
-    exit 1
+read -p "Voulez-vous continuer? (o/n): " confirm
+if [[ "$confirm" != "o" && "$confirm" != "O" ]]; then
+    echo "Installation annulée"
+    exit 0
 fi
+
+# Phase de nettoyage complet
+print_section "NETTOYAGE COMPLET DU SYSTÈME"
+print_info "Suppression des installations précédentes..."
+
+# Arrêt des services
+print_info "Arrêt des services..."
+systemctl stop nginx 2>/dev/null
+systemctl stop php8.4-fpm 2>/dev/null
+systemctl stop php8.3-fpm 2>/dev/null
+systemctl stop php8.2-fpm 2>/dev/null
+systemctl stop php8.1-fpm 2>/dev/null
+systemctl stop mysql 2>/dev/null
+systemctl stop mariadb 2>/dev/null
+systemctl stop redis-server 2>/dev/null
+systemctl stop meilisearch 2>/dev/null
+
+# Suppression de la base de données UNIT3D
+print_info "Suppression de la base de données..."
+mysql -e "DROP DATABASE IF EXISTS unit3d" 2>/dev/null
+mysql -e "DROP USER IF EXISTS 'unit3d'@'localhost'" 2>/dev/null
+mysql -e "FLUSH PRIVILEGES" 2>/dev/null
+
+# Suppression des fichiers d'installation précédents
+print_info "Suppression des fichiers d'installation..."
+rm -rf /var/www/UNIT3D
+rm -f /etc/nginx/sites-available/unit3d
+rm -f /etc/nginx/sites-enabled/unit3d
+rm -f /usr/local/bin/update-unit3d
+rm -f /etc/systemd/system/meilisearch.service
+
+# Nettoyage du cache Composer
+print_info "Nettoyage du cache Composer..."
+rm -rf /root/.composer
+rm -rf /var/www/.composer
+rm -rf /home/*/.composer
+
+print_info "Nettoyage terminé."
 
 # Demander les informations nécessaires
 read -p "Entrez le nom de domaine (sans http/https): " domain_name
@@ -83,69 +112,87 @@ fi
 APP_URL="http://$domain_name"
 
 # Mise à jour du système
-print_info "Mise à jour du système..."
+print_section "MISE À JOUR DU SYSTÈME"
+print_info "Mise à jour des dépôts et du système..."
 apt update && apt upgrade -y
 
 # Installation des dépendances de base
 print_info "Installation des dépendances de base..."
-apt install -y software-properties-common curl git unzip
+apt install -y software-properties-common curl git unzip wget gnupg2 lsb-release ca-certificates apt-transport-https
 
-# Installation native
-if [[ "$install_method" == "1" ]]; then
-    print_section "INSTALLATION NATIVE"
+# Ajout du PPA pour PHP 8.4
+print_section "INSTALLATION DE PHP 8.4"
+print_info "Ajout du dépôt PHP pour obtenir PHP 8.4..."
+add-apt-repository ppa:ondrej/php -y
+apt update
 
-    # Ajout du PPA pour PHP 8.4
-    print_info "Ajout du dépôt PHP pour obtenir PHP 8.4..."
-    add-apt-repository ppa:ondrej/php -y
-    apt update
+# Installation de PHP 8.4 et toutes les extensions requises
+print_info "Installation de PHP 8.4 et extensions requises..."
+apt install -y php8.4 php8.4-fpm php8.4-cli php8.4-common php8.4-mysql \
+    php8.4-zip php8.4-gd php8.4-mbstring php8.4-curl php8.4-xml php8.4-bcmath \
+    php8.4-intl php8.4-readline php8.4-opcache
 
-    # Installation de PHP 8.4 et toutes les extensions requises
-    print_info "Installation de PHP 8.4 et extensions requises..."
-    apt install -y php8.4 php8.4-fpm php8.4-cli php8.4-common php8.4-mysql \
-        php8.4-zip php8.4-gd php8.4-mbstring php8.4-curl php8.4-xml php8.4-bcmath \
-        php8.4-intl php8.4-readline php8.4-opcache
+# Vérification de l'installation de PHP
+PHP_VERSION=$(php -v | head -n 1)
+print_info "PHP installé: $PHP_VERSION"
 
-    # Installation de Nginx
-    print_info "Installation de Nginx..."
-    apt install -y nginx
-    systemctl enable nginx
-    systemctl start nginx
+# Installation de Nginx
+print_section "INSTALLATION DE NGINX"
+print_info "Installation et configuration de Nginx..."
+apt install -y nginx
+systemctl enable nginx
+systemctl start nginx
 
-    # Installation de MariaDB
-    print_info "Installation de MariaDB..."
-    apt install -y mariadb-server
-    systemctl enable mariadb
-    systemctl start mariadb
+# Installation de MariaDB
+print_section "INSTALLATION DE MARIADB"
+print_info "Installation et configuration de MariaDB..."
+apt install -y mariadb-server
+systemctl enable mariadb
+systemctl start mariadb
 
-    # Sécurisation de MariaDB
-    print_info "Configuration de MariaDB..."
-    mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$DB_PASS'"
-    mysql -e "DELETE FROM mysql.user WHERE User=''"
-    mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1')"
-    mysql -e "DROP DATABASE IF EXISTS test"
-    mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%'"
-    mysql -e "FLUSH PRIVILEGES"
+# Sécurisation de MariaDB avec gestion des erreurs
+print_info "Configuration de MariaDB..."
+# Utilisation d'une méthode plus robuste pour configurer MariaDB
+mysql -e "CREATE DATABASE IF NOT EXISTS $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+mysql -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
+mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
 
-    # Création de la base de données et de l'utilisateur
-    print_info "Création de la base de données..."
-    mysql -e "CREATE DATABASE $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
-    mysql -e "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS'"
-    mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost'"
-    mysql -e "FLUSH PRIVILEGES"
+# S'assurer que l'utilisateur utilise mysql_native_password pour la compatibilité
+mysql -e "ALTER USER '$DB_USER'@'localhost' IDENTIFIED WITH mysql_native_password BY '$DB_PASS';"
+mysql -e "FLUSH PRIVILEGES;"
 
-    # Installation de Redis
-    print_info "Installation de Redis..."
-    apt install -y redis-server
-    systemctl enable redis-server
-    systemctl start redis-server
+# Vérification de l'accès à la base de données
+if mysql -u $DB_USER -p$DB_PASS -e "USE $DB_NAME;" &> /dev/null; then
+    print_info "Accès à la base de données vérifié avec succès."
+else
+    print_error "Impossible d'accéder à la base de données avec l'utilisateur créé."
+    print_info "Tentative de correction..."
+    mysql -e "DROP USER IF EXISTS '$DB_USER'@'localhost';"
+    mysql -e "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
+    mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
+    mysql -e "FLUSH PRIVILEGES;"
 
-    # Installation de MeiliSearch
-    print_info "Installation de MeiliSearch..."
-    curl -L https://install.meilisearch.com | sh
-    mv ./meilisearch /usr/bin/
+    if ! mysql -u $DB_USER -p$DB_PASS -e "USE $DB_NAME;" &> /dev/null; then
+        print_error "Échec de la configuration de la base de données. Veuillez vérifier manuellement."
+        exit 1
+    fi
+fi
 
-    # Créer un service systemd pour MeiliSearch
-    cat > /etc/systemd/system/meilisearch.service << EOF
+# Installation de Redis
+print_section "INSTALLATION DE REDIS"
+print_info "Installation de Redis..."
+apt install -y redis-server
+systemctl enable redis-server
+systemctl start redis-server
+
+# Installation de MeiliSearch
+print_section "INSTALLATION DE MEILISEARCH"
+print_info "Installation de MeiliSearch..."
+curl -L https://install.meilisearch.com | sh
+mv ./meilisearch /usr/bin/
+
+# Créer un service systemd pour MeiliSearch
+cat > /etc/systemd/system/meilisearch.service << EOF
 [Unit]
 Description=MeiliSearch
 After=systemd-user-sessions.service
@@ -160,57 +207,83 @@ Environment="MEILI_NO_ANALYTICS=true"
 WantedBy=multi-user.target
 EOF
 
-    systemctl enable meilisearch
-    systemctl start meilisearch
+systemctl daemon-reload
+systemctl enable meilisearch
+systemctl start meilisearch
 
-    # Installation de Node.js et npm
-    print_info "Installation de Node.js et npm..."
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-    apt install -y nodejs
+# Installation de Node.js et npm
+print_section "INSTALLATION DE NODE.JS"
+print_info "Installation de Node.js et npm..."
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt install -y nodejs
 
-    # Vérification des versions
-    print_info "Versions installées:"
-    php --version
-    node --version
-    npm --version
+# Vérification des versions
+print_info "Versions installées:"
+php --version
+node --version
+npm --version
 
-    # Installation de Composer
-    print_info "Installation de Composer..."
-    curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+# Installation de Composer
+print_section "INSTALLATION DE COMPOSER"
+print_info "Installation de Composer..."
+curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
-    # Clonage du dépôt UNIT3D
-    print_info "Téléchargement de UNIT3D..."
-    cd /var/www
-    git clone https://github.com/HDInnovations/UNIT3D.git
-    chown -R www-data:www-data UNIT3D
-    cd UNIT3D
+# Installation de l'optimiseur d'images
+print_info "Installation de l'optimiseur d'images..."
+apt install -y jpegoptim optipng pngquant gifsicle webp
 
-    # Installation des dépendances avec Composer
-    print_info "Installation des dépendances PHP..."
-    sudo -u www-data composer install --no-dev --optimize-autoloader
+# Clonage du dépôt UNIT3D
+print_section "INSTALLATION DE UNIT3D"
+print_info "Téléchargement de UNIT3D..."
+mkdir -p /var/www
+cd /var/www
+# Supprimer le répertoire s'il existe déjà
+if [ -d "UNIT3D" ]; then
+    rm -rf UNIT3D
+fi
+git clone https://github.com/HDInnovations/UNIT3D.git
+cd UNIT3D
 
-    # Installation des dépendances Node.js
-    print_info "Installation des dépendances Node.js..."
-    npm install
-    npm run build
+# Préparation des permissions pour Composer
+print_info "Configuration des permissions pour Composer..."
+mkdir -p /var/www/.composer
+chown -R www-data:www-data /var/www/.composer
+export COMPOSER_HOME="/var/www/.composer"
 
-    # Configuration du fichier .env
-    print_info "Configuration de l'environnement..."
-    sudo -u www-data cp .env.example .env
-    sudo -u www-data php artisan key:generate
+# Installation des dépendances avec Composer
+print_info "Installation des dépendances PHP..."
+sudo -u www-data composer install --no-dev --optimize-autoloader --no-interaction
 
-    # Mise à jour du fichier .env
-    sed -i "s|APP_URL=.*|APP_URL=$APP_URL|g" .env
-    sed -i "s|DB_DATABASE=.*|DB_DATABASE=$DB_NAME|g" .env
-    sed -i "s|DB_USERNAME=.*|DB_USERNAME=$DB_USER|g" .env
-    sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=$DB_PASS|g" .env
-    sed -i "s|MAIL_FROM_ADDRESS=.*|MAIL_FROM_ADDRESS=$admin_email|g" .env
-    sed -i "s|REDIS_HOST=.*|REDIS_HOST=127.0.0.1|g" .env
-    sed -i "s|MEILISEARCH_HOST=.*|MEILISEARCH_HOST=http://127.0.0.1:7700|g" .env
+# Correction du fichier secure-headers.php si nécessaire
+if [ -f "config/secure-headers.php" ]; then
+    print_info "Correction du fichier secure-headers.php..."
+    # Remplacer les valeurs null par des chaînes vides dans les configurations d'URL
+    sed -i "s/'url' => null/'url' => ''/" config/secure-headers.php
+    sed -i "s/'url' => env('APP_URL', null)/'url' => env('APP_URL', '')/" config/secure-headers.php
+fi
 
-    # Configuration de Nginx
-    print_info "Configuration de Nginx..."
-    cat > /etc/nginx/sites-available/unit3d << EOF
+# Installation des dépendances Node.js
+print_info "Installation des dépendances Node.js..."
+npm install
+npm run build
+
+# Configuration du fichier .env
+print_info "Configuration de l'environnement..."
+cp .env.example .env
+php artisan key:generate
+
+# Mise à jour du fichier .env
+sed -i "s|APP_URL=.*|APP_URL=$APP_URL|g" .env
+sed -i "s|DB_DATABASE=.*|DB_DATABASE=$DB_NAME|g" .env
+sed -i "s|DB_USERNAME=.*|DB_USERNAME=$DB_USER|g" .env
+sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=$DB_PASS|g" .env
+sed -i "s|MAIL_FROM_ADDRESS=.*|MAIL_FROM_ADDRESS=$admin_email|g" .env
+sed -i "s|REDIS_HOST=.*|REDIS_HOST=127.0.0.1|g" .env
+sed -i "s|MEILISEARCH_HOST=.*|MEILISEARCH_HOST=http://127.0.0.1:7700|g" .env
+
+# Configuration de Nginx
+print_info "Configuration de Nginx..."
+cat > /etc/nginx/sites-available/unit3d << EOF
 server {
     listen 80;
     server_name $domain_name;
@@ -249,47 +322,84 @@ server {
 }
 EOF
 
-    # Activation de la configuration Nginx
-    ln -s /etc/nginx/sites-available/unit3d /etc/nginx/sites-enabled/
-    rm -f /etc/nginx/sites-enabled/default
-    nginx -t
-    systemctl reload nginx
+# Activation de la configuration Nginx
+ln -s /etc/nginx/sites-available/unit3d /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+systemctl reload nginx
 
-    # Migrations et seeders
-    print_info "Finalisation de l'installation..."
-    cd /var/www/UNIT3D
-    sudo -u www-data php artisan migrate --seed
-    sudo -u www-data php artisan storage:link
+# Migrations et seeders avec gestion des erreurs
+print_info "Finalisation de l'installation..."
+cd /var/www/UNIT3D
 
-    # Configuration des permissions
-    print_info "Configuration des permissions..."
-    chown -R www-data:www-data /var/www/UNIT3D
-    find /var/www/UNIT3D -type f -exec chmod 644 {} \;
-    find /var/www/UNIT3D -type d -exec chmod 755 {} \;
-    chmod -R 775 /var/www/UNIT3D/storage /var/www/UNIT3D/bootstrap/cache
+# Vérifier à nouveau l'accès à la base de données avant les migrations
+if ! mysql -u $DB_USER -p$DB_PASS -e "USE $DB_NAME;" &> /dev/null; then
+    print_error "Problème d'accès à la base de données avant les migrations."
+    print_info "Tentative de correction des permissions..."
+    mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
+    mysql -e "FLUSH PRIVILEGES;"
+fi
 
-    # Installation de l'optimiseur d'images
-    print_info "Installation de l'optimiseur d'images..."
-    apt install -y jpegoptim optipng pngquant gifsicle webp
+# Exécuter les migrations avec gestion des erreurs
+php artisan migrate --seed --force || {
+    print_error "Échec des migrations. Tentative de correction..."
+    # Réinitialiser la base de données et réessayer
+    mysql -e "DROP DATABASE $DB_NAME;"
+    mysql -e "CREATE DATABASE $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+    mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
+    mysql -e "FLUSH PRIVILEGES;"
+    php artisan migrate --seed --force || {
+        print_error "Échec des migrations après tentative de correction. Veuillez vérifier les logs."
+    }
+}
 
-    # Création d'un script de mise à jour
-    print_info "Création d'un script de mise à jour..."
-    cat > /usr/local/bin/update-unit3d << EOF
+php artisan storage:link
+
+# Configuration des permissions
+print_info "Configuration des permissions..."
+chown -R www-data:www-data /var/www/UNIT3D
+find /var/www/UNIT3D -type f -exec chmod 644 {} \;
+find /var/www/UNIT3D -type d -exec chmod 755 {} \;
+chmod -R 775 /var/www/UNIT3D/storage /var/www/UNIT3D/bootstrap/cache
+
+# Création d'un script de mise à jour
+print_info "Création d'un script de mise à jour..."
+cat > /usr/local/bin/update-unit3d << EOF
 #!/bin/bash
 cd /var/www/UNIT3D
 sudo -u www-data git pull
 sudo -u www-data composer install --no-dev --optimize-autoloader
 npm install
 npm run build
-sudo -u www-data php artisan migrate
+sudo -u www-data php artisan migrate --force
 sudo -u www-data php artisan cache:clear
 sudo -u www-data php artisan view:clear
 sudo -u www-data php artisan config:clear
 echo "UNIT3D a été mis à jour avec succès!"
 EOF
-    chmod +x /usr/local/bin/update-unit3d
+chmod +x /usr/local/bin/update-unit3d
 
-    # Résumé de l'installation
-    DB_ROOT_PASS=$DB_PASS
-    INSTALL_TYPE="Installation native"
-fi
+# Installation terminée
+print_section "INSTALLATION TERMINÉE"
+print_info "Installation terminée avec succès!"
+echo ""
+echo "==================================================="
+echo "      RÉSUMÉ DE L'INSTALLATION"
+echo "==================================================="
+echo "URL du site: $APP_URL"
+echo "Base de données: $DB_NAME"
+echo "Utilisateur DB: $DB_USER"
+echo "Mot de passe DB: $DB_PASS"
+echo ""
+echo "Email admin: $admin_email"
+echo ""
+echo "Chemin d'installation: /var/www/UNIT3D"
+echo "==================================================="
+echo ""
+print_warning "N'oubliez pas de configurer HTTPS pour votre site!"
+print_warning "Vous pouvez utiliser Certbot pour obtenir un certificat SSL gratuit:"
+echo "sudo apt install -y certbot python3-certbot-nginx"
+echo "sudo certbot --nginx -d $domain_name"
+echo ""
+print_info "Pour mettre à jour UNIT3D à l'avenir, utilisez la commande:"
+echo "sudo update-unit3d"
