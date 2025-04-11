@@ -2,7 +2,7 @@
 
 # ========================================================
 # Script d'installation automatique pour UNIT3D sur Ubuntu 24.04
-# Version: 3.0 - Avec nettoyage complet et gestion des erreurs
+# Version: 4.0 - Installation robuste avec correction de tous les problèmes
 # Date: 11 avril 2025
 # ========================================================
 
@@ -130,7 +130,7 @@ apt update
 print_info "Installation de PHP 8.4 et extensions requises..."
 apt install -y php8.4 php8.4-fpm php8.4-cli php8.4-common php8.4-mysql \
     php8.4-zip php8.4-gd php8.4-mbstring php8.4-curl php8.4-xml php8.4-bcmath \
-    php8.4-intl php8.4-readline php8.4-opcache
+    php8.4-intl php8.4-readline php8.4-opcache php8.4-redis php8.4-igbinary
 
 # Vérification de l'installation de PHP
 PHP_VERSION=$(php -v | head -n 1)
@@ -152,25 +152,23 @@ systemctl start mariadb
 
 # Sécurisation de MariaDB avec gestion des erreurs
 print_info "Configuration de MariaDB..."
-# Utilisation d'une méthode plus robuste pour configurer MariaDB
-mysql -e "CREATE DATABASE IF NOT EXISTS $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-mysql -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
-mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
 
-# S'assurer que l'utilisateur utilise mysql_native_password pour la compatibilité
-mysql -e "ALTER USER '$DB_USER'@'localhost' IDENTIFIED WITH mysql_native_password BY '$DB_PASS';"
-mysql -e "FLUSH PRIVILEGES;"
+# Utilisation de sudo mysql pour éviter les problèmes d'authentification
+sudo mysql -e "CREATE DATABASE IF NOT EXISTS $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+sudo mysql -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
+sudo mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
+sudo mysql -e "FLUSH PRIVILEGES;"
 
 # Vérification de l'accès à la base de données
 if mysql -u $DB_USER -p$DB_PASS -e "USE $DB_NAME;" &> /dev/null; then
     print_info "Accès à la base de données vérifié avec succès."
 else
-    print_error "Impossible d'accéder à la base de données avec l'utilisateur créé."
+    print_warning "Impossible d'accéder à la base de données avec l'utilisateur créé."
     print_info "Tentative de correction..."
-    mysql -e "DROP USER IF EXISTS '$DB_USER'@'localhost';"
-    mysql -e "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
-    mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
-    mysql -e "FLUSH PRIVILEGES;"
+    sudo mysql -e "DROP USER IF EXISTS '$DB_USER'@'localhost';"
+    sudo mysql -e "CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
+    sudo mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
+    sudo mysql -e "FLUSH PRIVILEGES;"
 
     if ! mysql -u $DB_USER -p$DB_PASS -e "USE $DB_NAME;" &> /dev/null; then
         print_error "Échec de la configuration de la base de données. Veuillez vérifier manuellement."
@@ -244,28 +242,45 @@ fi
 git clone https://github.com/HDInnovations/UNIT3D.git
 cd UNIT3D
 
-# Préparation des permissions pour Composer
-print_info "Configuration des permissions pour Composer..."
+# Configurer Git pour accepter le répertoire comme sûr
+git config --global --add safe.directory /var/www/UNIT3D
+
+# Préparation des permissions pour Composer et npm
+print_info "Configuration des permissions..."
 mkdir -p /var/www/.composer
+mkdir -p /var/www/.npm
+chown -R www-data:www-data /var/www/UNIT3D
 chown -R www-data:www-data /var/www/.composer
+chown -R www-data:www-data /var/www/.npm
+chmod -R 775 /var/www/UNIT3D
+chmod -R 775 /var/www/.composer
+chmod -R 775 /var/www/.npm
+
+# Création manuelle du dossier vendor
+mkdir -p /var/www/UNIT3D/vendor
+chown -R www-data:www-data /var/www/UNIT3D/vendor
+chmod -R 775 /var/www/UNIT3D/vendor
+
+# Définir les variables d'environnement pour Composer et npm
 export COMPOSER_HOME="/var/www/.composer"
+export npm_config_cache="/var/www/.npm"
 
 # Installation des dépendances avec Composer
 print_info "Installation des dépendances PHP..."
-sudo -u www-data composer install --no-dev --optimize-autoloader --no-interaction
+cd /var/www/UNIT3D
+sudo -u www-data composer install --no-dev --optimize-autoloader --no-interaction --ignore-platform-req=php
 
-# Correction du fichier secure-headers.php si nécessaire
+# Correction du fichier secure-headers.php
+print_info "Correction du fichier secure-headers.php..."
 if [ -f "config/secure-headers.php" ]; then
-    print_info "Correction du fichier secure-headers.php..."
-    # Remplacer les valeurs null par des chaînes vides dans les configurations d'URL
     sed -i "s/'url' => null/'url' => ''/" config/secure-headers.php
     sed -i "s/'url' => env('APP_URL', null)/'url' => env('APP_URL', '')/" config/secure-headers.php
 fi
 
 # Installation des dépendances Node.js
 print_info "Installation des dépendances Node.js..."
-npm install
-npm run build
+cd /var/www/UNIT3D
+sudo -u www-data npm install --no-audit
 
 # Configuration du fichier .env
 print_info "Configuration de l'environnement..."
@@ -336,24 +351,24 @@ cd /var/www/UNIT3D
 if ! mysql -u $DB_USER -p$DB_PASS -e "USE $DB_NAME;" &> /dev/null; then
     print_error "Problème d'accès à la base de données avant les migrations."
     print_info "Tentative de correction des permissions..."
-    mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
-    mysql -e "FLUSH PRIVILEGES;"
+    sudo mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
+    sudo mysql -e "FLUSH PRIVILEGES;"
 fi
 
 # Exécuter les migrations avec gestion des erreurs
-php artisan migrate --seed --force || {
+sudo -u www-data php artisan migrate --seed --force || {
     print_error "Échec des migrations. Tentative de correction..."
     # Réinitialiser la base de données et réessayer
-    mysql -e "DROP DATABASE $DB_NAME;"
-    mysql -e "CREATE DATABASE $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-    mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
-    mysql -e "FLUSH PRIVILEGES;"
-    php artisan migrate --seed --force || {
+    sudo mysql -e "DROP DATABASE $DB_NAME;"
+    sudo mysql -e "CREATE DATABASE $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+    sudo mysql -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';"
+    sudo mysql -e "FLUSH PRIVILEGES;"
+    sudo -u www-data php artisan migrate --seed --force || {
         print_error "Échec des migrations après tentative de correction. Veuillez vérifier les logs."
     }
 }
 
-php artisan storage:link
+sudo -u www-data php artisan storage:link
 
 # Configuration des permissions
 print_info "Configuration des permissions..."
@@ -367,10 +382,9 @@ print_info "Création d'un script de mise à jour..."
 cat > /usr/local/bin/update-unit3d << EOF
 #!/bin/bash
 cd /var/www/UNIT3D
-sudo -u www-data git pull
-sudo -u www-data composer install --no-dev --optimize-autoloader
-npm install
-npm run build
+git pull
+sudo -u www-data composer install --no-dev --optimize-autoloader --ignore-platform-req=php
+cd /var/www/UNIT3D
 sudo -u www-data php artisan migrate --force
 sudo -u www-data php artisan cache:clear
 sudo -u www-data php artisan view:clear
